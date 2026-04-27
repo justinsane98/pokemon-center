@@ -197,22 +197,35 @@
   }
   #townsquare .resize-handle {
     position: absolute;
-    top: -3px;            /* sits over the border-top, easier to grab */
+    top: -4px;
     left: 0;
     right: 0;
-    height: 7px;
+    height: 8px;
     cursor: ns-resize;
-    z-index: 80;
+    z-index: 100;
+    background: transparent;
+    touch-action: none;
   }
+  /* Subtle visible grip line — always faint, brighter on hover/active. */
   #townsquare .resize-handle::after {
     content: "";
     position: absolute;
-    inset: 3px 0 3px 0;
-    background: transparent;
-    transition: background 0.15s;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 36px;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.18);
+    transition: background 0.15s, width 0.15s;
   }
-  #townsquare .resize-handle:hover::after { background: rgba(255,255,255,0.08); }
+  #townsquare .resize-handle:hover::after,
+  body.resizing-townsquare #townsquare .resize-handle::after {
+    background: rgba(255, 255, 255, 0.5);
+    width: 56px;
+  }
   body.resizing-townsquare { cursor: ns-resize; user-select: none; }
+  body.resizing-townsquare * { user-select: none !important; }
   #townsquare header {
     padding: 8px 14px;
     background: #1a2238;
@@ -932,25 +945,36 @@ _world?.addEventListener("wheel", e => {
   const saved = parseInt(localStorage.getItem("arena.chatHeight") || "", 10);
   if (saved && saved > 80) ts.style.flex = `0 0 ${saved}px`;
 
-  handle.addEventListener("mousedown", (e) => {
+  // Use pointer events so this works for mouse, trackpad, and touch alike.
+  // setPointerCapture keeps move/up events flowing to us even if the cursor
+  // leaves the handle while dragging.
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
     e.preventDefault();
+    e.stopPropagation();
+    handle.setPointerCapture(e.pointerId);
+
     const startY = e.clientY;
     const startH = ts.getBoundingClientRect().height;
     document.body.classList.add("resizing-townsquare");
+
     const onMove = (ev) => {
       const dy = startY - ev.clientY;     // drag up = grow
       const next = Math.max(80, Math.min(window.innerHeight - 120, startH + dy));
       ts.style.flex = `0 0 ${next}px`;
     };
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+    const onUp = (ev) => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      try { handle.releasePointerCapture(ev.pointerId); } catch {}
       document.body.classList.remove("resizing-townsquare");
       const h = Math.round(ts.getBoundingClientRect().height);
       localStorage.setItem("arena.chatHeight", String(h));
     };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
   });
 })();
 
