@@ -1,0 +1,1418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Pokémon Arena</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #0a0710;
+    color: #e8eaf0;
+    font-family: -apple-system, "SF Pro Display", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  body { display: flex; flex-direction: column; }
+
+  /* world: scrollable viewport, dark void around stage (rarely visible bc
+     stage is much bigger than the building).
+     `safe center` keeps the stage centered when smaller than viewport but
+     falls back to start-aligned (=scrollable) when zoomed-in stage exceeds it. */
+  #world {
+    flex: 1 1 auto;
+    overflow: auto;
+    background: #0a0710;
+    cursor: grab;
+    display: flex;
+    align-items: safe center;
+    justify-content: safe center;
+  }
+  #world.dragging { cursor: grabbing; }
+  #world.dragging * { user-select: none; pointer-events: none; }
+  #zoom-controls, #zoom-controls * { pointer-events: auto !important; }
+
+  /* stage-outer: tracks the SCALED size so scrollbars/flex are correct.
+     stage-inner inside is the actual content at native size, scaled via
+     transform. */
+  #stage-outer {
+    position: relative;
+    image-rendering: pixelated;
+    /* width/height set in JS = native * zoom */
+  }
+  #stage {
+    position: absolute;
+    top: 0;
+    left: 0;
+    image-rendering: pixelated;
+    transform-origin: top left;
+    background-image: url(varied_grass.png);
+    background-repeat: repeat;
+    background-size: 576px 576px;
+    /* width/height = native (set in JS); transform: scale(zoom) applied.
+       NOTE: no CSS transition on transform, scroll-restore in zoomBy() runs in rAF
+       and would visibly shift before the scale catches up if the transform animates. */
+  }
+
+  /* building wrapper: sized exactly to building's native dimensions,
+     centered in the stage. Sprites go inside this wrapper so they sit on
+     the building, not floating in the grass. */
+  #building-wrap {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    /* width/height set by JS to match building's natural size */
+  }
+
+  /* building image at native size, single fixed sprite */
+  #building {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+
+  /* outdoor decoration (trees, bushes, flowers), placed on stage in grass */
+  .decor {
+    position: absolute;
+    image-rendering: pixelated;
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+
+  /* pokémon sprite, positioned over the building in % of building */
+  .sprite {
+    position: absolute;
+    width: 7%;                    /* relative to building width */
+    aspect-ratio: 1 / 1;
+    transform: translate(-50%, -50%);
+    image-rendering: pixelated;
+    cursor: pointer;
+    transition: filter 0.15s, transform 0.15s ease-out;
+    filter: drop-shadow(0 4px 1px rgba(0, 0, 0, 0.55));
+    transform-origin: 50% 90%;
+    z-index: 10;
+  }
+  .sprite:hover {
+    transform: translate(-50%, -50%) scale(1.15);
+    filter: drop-shadow(0 0 8px var(--accent, #fff))
+            drop-shadow(0 4px 1px rgba(0,0,0,0.55));
+  }
+  .sprite img {
+    width: 100%; height: 100%;
+    image-rendering: pixelated;
+    pointer-events: none;
+  }
+  .sprite .bubble {
+    position: absolute;
+    bottom: calc(100% - var(--bubble-drop, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    margin-bottom: 8px;
+    max-width: 248px;             /* shrink to fit; only caps at tweet width */
+    box-sizing: border-box;
+    background: #fff;
+    color: #1a1f2e;
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.35;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.6);
+    white-space: normal;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    text-align: left;
+    pointer-events: none;
+    animation: bubbleIn 0.25s ease-out;
+  }
+  .sprite[data-id="bulbasaur"] .bubble { --bubble-drop: 20px; }
+  .sprite .bubble.thinking {
+    text-align: center;
+    animation: bubbleIn 0.25s ease-out, bubblePulse 1.4s 0.25s ease-in-out infinite;
+  }
+  /* For substantive content (longer than a single short word), give the
+     bubble a min-width so it reads as a card instead of a tight pill. */
+  .sprite .bubble.has-content {
+    min-width: 200px;
+  }
+  @keyframes bubblePulse {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+  }
+  .sprite .bubble::after {
+    content: '';
+    position: absolute;
+    top: 100%; left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: #fff;
+  }
+  @keyframes bubbleIn {
+    from { opacity: 0; transform: translateX(-50%) translateY(4px) scale(0.85); }
+    to   { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+  }
+
+  /* zoom controls, top-right of viewport */
+  #zoom-controls {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    z-index: 90;
+  }
+  #zoom-controls button {
+    width: 36px; height: 36px;
+    background: rgba(0, 0, 0, 0.75);
+    color: #e8eaf0;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 6px;
+    font-size: 18px; font-weight: 700;
+    cursor: pointer;
+    font-family: ui-monospace, monospace;
+  }
+  #zoom-controls button:hover { background: rgba(40, 50, 80, 0.9); }
+  #zoom-controls .label {
+    background: rgba(0,0,0,0.75);
+    color: #9aaad0;
+    font-size: 10px;
+    text-align: center;
+    padding: 2px 0;
+    border-radius: 4px;
+    font-family: ui-monospace, monospace;
+  }
+
+  /* town square, vertical resizer on its top edge lets you drag-adjust height */
+  #townsquare {
+    flex: 0 0 200px;
+    background: #0e1320;
+    border-top: 2px solid #2a3550;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+  }
+  #townsquare .resize-handle {
+    position: absolute;
+    top: -3px;            /* sits over the border-top, easier to grab */
+    left: 0;
+    right: 0;
+    height: 7px;
+    cursor: ns-resize;
+    z-index: 80;
+  }
+  #townsquare .resize-handle::after {
+    content: "";
+    position: absolute;
+    inset: 3px 0 3px 0;
+    background: transparent;
+    transition: background 0.15s;
+  }
+  #townsquare .resize-handle:hover::after { background: rgba(255,255,255,0.08); }
+  body.resizing-townsquare { cursor: ns-resize; user-select: none; }
+  #townsquare header {
+    padding: 8px 14px;
+    background: #1a2238;
+    color: #9aaad0;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  #townsquare header .pulse {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #4ade80;
+    box-shadow: 0 0 8px #4ade80;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+  #log {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 10px 14px;
+    font-size: 13px;
+    line-height: 1.45;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  /* ─── Minimal chat-row: prefix, message, time, all inline on one flex line ─
+     Group chat: prefix = bold name (clickable, opens that pokemon's modal).
+     Modal: prefix = accent-colored dot, no name. Time always trailing. */
+  .chat-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+  }
+  .chat-row .who {
+    font-weight: 700;
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  /* Group-chat names get a fixed-width gutter so content lines up across rows. */
+  #log .chat-row .who {
+    min-width: 76px;
+    text-align: left;
+  }
+  /* Bullet: a CSS-drawn dot centered to the first text line of the row.
+     A faint 2px accent-colored line drops from the dot to the bottom of the
+     row, visually threading message-to-message. */
+  .chat-row .bullet {
+    flex-shrink: 0;
+    align-self: stretch;          /* span full row height so the line can extend */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 7px;
+    user-select: none;
+  }
+  .chat-row .bullet::before {
+    content: "";
+    display: block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+    margin-top: calc((1lh - 7px) / 2);     /* center on first text line */
+    flex-shrink: 0;
+  }
+  .chat-row .bullet::after {
+    content: "";
+    flex: 1;                                 /* fills remaining row height… */
+    width: 2px;
+    margin-top: 2px;
+    margin-bottom: 10px;                     /* …minus 10px at the bottom */
+    background: color-mix(in srgb, currentColor 10%, transparent);
+  }
+  /* Hide the trailing line for single-line rows, only longer messages get a line. */
+  .chat-row:not(.multiline) .bullet::after { display: none; }
+  /* Justin's own rows sit at 50% opacity so the agents are the focus.
+     (Time stays at its base opacity, no double-dim.) */
+  .dialog .body .chat-row.user .content,
+  .dialog .body .chat-row.user .bullet,
+  #log .chat-row.user .content,
+  #log .chat-row.user .who,
+  #log .chat-row.user .bullet {
+    opacity: 0.5;
+  }
+  /* Modal hides the name span, only the bullet acts as the speaker indicator. */
+  .dialog .body .chat-row .who { display: none; }
+  .chat-row .ts {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.16);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+    margin-left: auto;       /* push time to the right end of the row */
+    user-select: none;       /* exclude from copy when grabbing message text */
+  }
+  .chat-row .content {
+    flex: 1;
+    min-width: 0;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+  }
+  .chat-row .content > *:first-child { margin-top: 0; }
+  .chat-row .content > *:last-child  { margin-bottom: 0; }
+  .chat-row .who[data-pokemon] {
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .chat-row .who[data-pokemon]:hover { opacity: 0.75; text-decoration: underline; }
+  .chat-row.system {
+    grid-column: 1 / -1;
+    display: block;
+    color: #6b7494;
+    font-style: italic;
+    font-size: 12px;
+  }
+  /* (more) pill, clickable, opens that pokemon's modal at the full message */
+  .chat-row .has-more {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 6px;
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.35);
+    border: 0;
+    border-radius: 999px;
+    font-size: 8px;
+    font-weight: 400;
+    font-family: inherit;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    cursor: pointer;
+    vertical-align: 1px;
+    user-select: none;
+    transition: background 0.15s, color 0.15s;
+  }
+  .chat-row .has-more:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
+  .chat-row .quote {
+    border-left: 2px solid rgba(255, 255, 255, 0.18);
+    padding: 0 0 0 8px;
+    margin: 0 0 4px 0;
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 12px;
+    font-style: italic;
+  }
+  .chat-row .mention { font-weight: 700; }
+  .chat-row .mention-team { color: #ffffff; font-weight: 700; }
+  #composer {
+    display: flex;
+    border-top: 1px solid #2a3550;
+    background: #131929;
+  }
+  #composer input {
+    flex: 1;
+    background: transparent;
+    border: 0;
+    color: #e8eaf0;
+    padding: 10px 14px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+  }
+  #composer input::placeholder { color: #4a5575; }
+  #composer button {
+    background: #2a3550;
+    color: #e8eaf0;
+    border: 0;
+    padding: 0 18px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #composer button:hover { background: #3a4570; }
+
+  /* dialog modal, backdrop fades, dialog fades + scales for a touch of polish */
+  #modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(10, 14, 26, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease-out;
+  }
+  #modal-backdrop.open {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .dialog {
+    width: 720px;
+    max-width: 92vw;
+    max-height: 80vh;
+    background: color-mix(in srgb, var(--agent-accent, #2a3550) 9%, #0a0e1a);
+    border: 2px solid color-mix(in srgb, var(--agent-accent, #2a3550) 10%, transparent);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    overflow: visible;     /* avatar pokes above modal */
+    box-shadow: 0 24px 70px color-mix(in srgb, var(--agent-accent, #000), transparent 80%);
+    opacity: 0;
+    transform: scale(0.96);
+    transition: opacity 0.2s ease-out, transform 0.24s cubic-bezier(0.2, 0.75, 0.2, 1);
+  }
+  #modal-backdrop.open .dialog {
+    opacity: 1;
+    transform: scale(1);
+  }
+  .dialog header {
+    padding: 6px 16px 6px 54px;
+    height: 52px;                   /* locked, every pokemon's header is identical */
+    min-height: 52px;
+    max-height: 52px;
+    box-sizing: border-box;
+    background: color-mix(in srgb, var(--agent-accent, #2a3550) 18%, #0a0e1a);
+    border-bottom: 4px solid var(--agent-accent, #2a3550);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: relative;
+    /* NOTE: do NOT set overflow:hidden here, the avatar circle pokes above
+       the header by design (top: -12px) and would get clipped. */
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+  }
+  /* circular avatar, crops the sprite, zooms in on face, and pops OUT
+     above the modal entirely. Border is rendered OUTSIDE the box (via
+     box-shadow ring) so it doesn't shrink the inner avatar size. */
+  .dialog header .avatar {
+    position: absolute;
+    left: -23px;
+    top: -12px;
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    overflow: hidden;                /* clips the inner sprite to circle */
+    background: color-mix(in srgb, var(--agent-accent, #2a3550) 9%, #0a0e1a);
+    box-shadow: 0 0 0 4px var(--agent-accent, #2a3550),
+                0 6px 16px rgba(0,0,0,0.6);
+    z-index: 10;
+  }
+  .dialog header .avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    transform: scale(2.4);
+    transform-origin: 50% 22%;     /* zoom in on the upper portion = face */
+    image-rendering: pixelated;
+    display: block;
+  }
+  .dialog header .meta { flex: 1; min-width: 0; }
+  .dialog header .name {
+    font-size: 16px; font-weight: 700;
+    color: var(--agent-accent, #fff);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .dialog header .role {
+    font-size: 9px; color: #9aaad0;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .dialog header button {
+    background: transparent; border: 0; color: #9aaad0;
+    font-size: 22px; cursor: pointer; padding: 0 4px;
+  }
+  .dialog header button:hover { color: #fff; }
+  .dialog .body {
+    flex: 1; overflow-y: auto;
+    padding: 10px 12px;
+    font-size: 12px; line-height: 1.7;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  /* Modal body content uses the same .chat-row layout as the group chat;
+     no bubble wrapper, no asymmetric corners, just left-aligned name+time+message.
+     User messages preserve their input whitespace; agent messages render markdown. */
+  .dialog .body .chat-row.user .content { white-space: pre-wrap; }
+  .dialog .input {
+    display: flex;
+    border-top: 1px solid color-mix(in srgb, var(--agent-accent, #2a3550) 18%, transparent);
+    background: color-mix(in srgb, var(--agent-accent, #2a3550) 5%, #06090f);
+    border-bottom-left-radius: 10px;
+    border-bottom-right-radius: 10px;
+  }
+  .dialog .input input {
+    flex: 1; background: transparent; border: 0; color: #e8eaf0;
+    padding: 12px 18px; font-size: 13px; font-family: inherit; outline: none;
+  }
+
+
+  /* ── Markdown rendering inside the modal's chat content cell ───────── */
+  .dialog .body .chat-row .content p              { margin: 0 0 6px 0; }
+  .dialog .body .chat-row .content ul,
+  .dialog .body .chat-row .content ol             { margin: 4px 0 6px 18px; padding: 0; }
+  .dialog .body .chat-row .content li             { margin: 2px 0; }
+  .dialog .body .chat-row .content h1,
+  .dialog .body .chat-row .content h2,
+  .dialog .body .chat-row .content h3,
+  .dialog .body .chat-row .content h4             { margin: 6px 0 4px 0; font-size: 13px; font-weight: 700; }
+  .dialog .body .chat-row .content strong         { font-weight: 700; }
+  .dialog .body .chat-row .content em             { font-style: italic; }
+  .dialog .body .chat-row .content a              { color: #ffe082; text-decoration: underline; }
+  .dialog .body .chat-row .content hr             { border: 0; border-top: 1px solid rgba(255,255,255,0.15); margin: 6px 0; }
+  .dialog .body .chat-row .content blockquote {
+    border-left: 3px solid rgba(255,255,255,0.25);
+    padding-left: 8px; margin: 4px 0;
+    color: rgba(255,255,255,0.78);
+  }
+  .dialog .body .chat-row .content code {
+    background: rgba(255, 255, 255, 0.06);
+    padding: 1px 5px; border-radius: 4px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11px;
+  }
+  .dialog .body .chat-row.user .content code      { background: rgba(255, 255, 255, 0.10); }
+  .dialog .body .chat-row .content pre {
+    position: relative;
+    background: rgba(0, 0, 0, 0.18);
+    color: #b9c4dc;
+    padding: 8px 10px;
+    margin: 6px 0;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 11px;
+    line-height: 1.5;
+    user-select: text;
+  }
+  .dialog .body .chat-row .content pre code {
+    background: transparent; padding: 0; font-size: inherit;
+    white-space: pre;
+  }
+  .dialog .body .chat-row .content pre .copy-btn {
+    position: absolute;
+    top: 6px; right: 6px;
+    background: rgba(255,255,255,0.12);
+    color: #e8eaf0;
+    border: 0; border-radius: 4px;
+    padding: 4px;
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+    display: inline-flex;
+    align-items: center;
+    line-height: 0;
+  }
+  .dialog .body .chat-row .content pre .copy-btn:hover,
+  .dialog .body .chat-row .content pre .copy-btn:focus { opacity: 1; background: rgba(255,255,255,0.22); color: #fff; }
+  .dialog .body .chat-row .content pre .copy-btn svg { display: block; }
+  .dialog .body .chat-row .content table             { border-collapse: collapse; margin: 4px 0; }
+  .dialog .body .chat-row .content th,
+  .dialog .body .chat-row .content td               { border: 1px solid rgba(255,255,255,0.18); padding: 3px 6px; }
+</style>
+<script src="vendor/marked.min.js"></script>
+</head>
+<body>
+
+<div id="world">
+  <div id="stage-outer">
+    <div id="stage">
+      <div id="building-wrap">
+        <img id="building" src="building.png" alt="Pixelmon Office Building" />
+        <!-- pokémon sprites get appended inside building-wrap (positioned in % of building) -->
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="zoom-controls">
+  <button onclick="zoomBy(1.1)" title="Zoom in (+)">+</button>
+  <button onclick="zoomBy(0.9)" title="Zoom out (-)">−</button>
+  <button onclick="resetView()" title="Reset (0)">⌂</button>
+</div>
+
+<aside id="townsquare">
+  <div class="resize-handle" title="drag to resize chat"></div>
+  <header>
+    <span class="pulse"></span>
+    Chat
+  </header>
+  <div id="log"></div>
+  <form id="composer" onsubmit="sendBroadcast(event)">
+    <input id="broadcast-input" placeholder="@team something… or just type to journal" autocomplete="off" />
+    <button type="submit">Send</button>
+  </form>
+</aside>
+
+<div id="modal-backdrop" onclick="if(event.target.id==='modal-backdrop')closeDialog()">
+  <div class="dialog" id="dialog">
+    <header>
+      <div class="avatar"><img id="dialog-img" /></div>
+      <div class="meta">
+        <div class="name" id="dialog-name"></div>
+        <div class="role" id="dialog-role"></div>
+      </div>
+      <button onclick="closeDialog()">×</button>
+    </header>
+    <div class="body" id="dialog-body"></div>
+    <form class="input" onsubmit="sendDialog(event)">
+      <input id="dialog-input" placeholder="Type a message…" autocomplete="off" />
+    </form>
+  </div>
+</div>
+
+<script>
+  // Sync-load config.json so the main script can read window.ARENA_CONFIG synchronously.
+  // (Browser warns about sync XHR; alternative is wrapping every existing global in an async IIFE.)
+  const _cx = new XMLHttpRequest();
+  _cx.open("GET", "config.json", false);
+  _cx.send();
+  window.ARENA_CONFIG = JSON.parse(_cx.responseText);
+</script>
+<script>
+const ARENA_CONFIG = window.ARENA_CONFIG;
+const SPRITE_DIR = ARENA_CONFIG.spriteDir || "/sprites";
+
+// Roster (id, name, role, accent, greet, pos, avatar) is loaded from config.json.
+// Drop a different config in to ship a different team.
+const ROSTER = ARENA_CONFIG.roster;
+
+const sprites    = [];
+const stageOuter = document.getElementById("stage-outer");
+const stage      = document.getElementById("stage");
+const wrap       = document.getElementById("building-wrap");
+const building   = document.getElementById("building");
+
+// padMult, decor, and decorScale all come from config.json so swap teams in one place.
+const PAD_MULT    = ARENA_CONFIG.padMult ?? 3;
+const DECOR       = ARENA_CONFIG.decor || [];
+const DECOR_SCALE = ARENA_CONFIG.decorScale ?? 2.0;
+
+building.onload = () => {
+  const bw = building.naturalWidth, bh = building.naturalHeight;
+  // building-wrap: exact building size (sprites position against this in %)
+  wrap.style.width  = bw + "px";
+  wrap.style.height = bh + "px";
+  // stage: bigger than building, with grass background filling the surround
+  stage.style.width  = (bw * PAD_MULT) + "px";
+  stage.style.height = (bh * PAD_MULT) + "px";
+
+  // ── place outdoor decoration on the stage (in % so they sit in grass) ──
+  for (const d of DECOR) {
+    const el = document.createElement("img");
+    el.className = "decor";
+    el.src = `atlas/sprites/${d.sprite}.png`;
+    el.style.left = d.x + "%";
+    el.style.top  = d.y + "%";
+    // Use explicit width/height (these scale with the stage's CSS zoom, while
+    // transform: scale doesn't). transform handles ANCHORING only.
+    el.style.transform = "translate(-50%, -100%)";
+    el.onload = () => {
+      el.style.width  = (el.naturalWidth  * DECOR_SCALE) + "px";
+      el.style.height = (el.naturalHeight * DECOR_SCALE) + "px";
+    };
+    stage.appendChild(el);
+  }
+
+  // Place pokémon sprites INSIDE building-wrap so % positions are relative to
+  // the building, not the stage.
+  for (const p of ROSTER) {
+    const el = document.createElement("div");
+    el.className = "sprite";
+    el.dataset.id = p.id;
+    el.style.setProperty("--accent", p.accent);
+    el.style.left = p.pos.x + "%";
+    el.style.top  = p.pos.y + "%";
+    if (p.size) el.style.width = p.size + "%";    // optional per-pokemon size
+
+    const img = document.createElement("img");
+    img.src = `${SPRITE_DIR}/${p.id}.png`;
+    img.alt = p.name;
+    el.appendChild(img);
+
+    el.addEventListener("click", e => { e.stopPropagation(); openDialog(p); });
+    wrap.appendChild(el);
+
+    sprites.push({ data: p, el, bubbleEl: null });
+  }
+
+  // initial zoom, fit the BUILDING into viewport (not the entire stage)
+  const viewportW = window.innerWidth  - 64;
+  const viewportH = window.innerHeight - 200 - 64;
+  const fitZoom = Math.min(viewportW / bw, viewportH / bh);
+  setZoom(Math.min(1, fitZoom));
+  // Then scroll so the building (= stage center) is centered in the viewport
+  requestAnimationFrame(scrollToBuildingCenter);
+  restoreBubbles();
+};
+
+// Center the world's scroll so the building (= center of stage) is at the
+// viewport's center. Only does anything if the stage-outer overflows the world.
+function scrollToBuildingCenter() {
+  _world.scrollLeft = (_world.scrollWidth  - _world.clientWidth)  / 2;
+  _world.scrollTop  = (_world.scrollHeight - _world.clientHeight) / 2;
+}
+building.onerror = () => {
+  appendSystem("✗ building.png failed to load");
+};
+
+function rnd(a, b) { return a + Math.random() * (b - a); }
+
+// ─── persisted state: sessions + transcripts + lastRead ───────────────────
+// Each transcript entry: { role: "user"|"assistant", body, summary?, at, streaming?, source: "chat"|"broadcast" }
+// Unread = assistant entries with `at > lastRead[id]`. lastRead bumps on dialog open and on stream-done while dialog is still focused.
+const LS_SESSIONS    = "arena.sessions";
+const LS_TRANSCRIPTS = "arena.transcripts";
+const LS_LASTREAD    = "arena.lastRead";
+function _loadLS(k) { try { return JSON.parse(localStorage.getItem(k) || "{}"); } catch { return {}; } }
+function _saveLS(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+
+const _state = {
+  sessions:    _loadLS(LS_SESSIONS),
+  transcripts: _loadLS(LS_TRANSCRIPTS),
+  lastRead:    _loadLS(LS_LASTREAD),
+};
+
+function getSession(id)       { return _state.sessions[id] || null; }
+function setSession(id, sid)  { _state.sessions[id] = sid; _saveLS(LS_SESSIONS, _state.sessions); }
+function getTranscript(id)    { return _state.transcripts[id] || []; }
+function _saveTranscripts()   { _saveLS(LS_TRANSCRIPTS, _state.transcripts); }
+function pushTurn(id, turn) {
+  (_state.transcripts[id] = _state.transcripts[id] || []).push(turn);
+  _saveTranscripts();
+  return _state.transcripts[id].length - 1;
+}
+function updateTurn(id, idx, patch) {
+  const t = _state.transcripts[id]?.[idx];
+  if (!t) return;
+  Object.assign(t, patch);
+  _saveTranscripts();
+}
+function getLastRead(id)      { return _state.lastRead[id] || 0; }
+function markRead(id) {
+  _state.lastRead[id] = Date.now();
+  _saveLS(LS_LASTREAD, _state.lastRead);
+}
+function unreadAssistantTurns(id) {
+  const lr = getLastRead(id);
+  return getTranscript(id).filter(t => t.role === "assistant" && (t.at || 0) > lr);
+}
+
+// ─── sprite bubbles (event-driven; no ambient timer) ──────────────────────
+const BUBBLE_MAX = 140; // OG tweet length
+function truncate(s, n) {
+  const flat = (s || "").replace(/\s+/g, " ").trim();
+  return flat.length > n ? flat.slice(0, n - 1) + "…" : flat;
+}
+function findSprite(id) { return sprites.find(s => s.data.id === id); }
+function _ensureBubble(s) {
+  if (!s.bubbleEl) {
+    const b = document.createElement("div");
+    b.className = "bubble";
+    s.el.appendChild(b);
+    s.bubbleEl = b;
+  }
+  return s.bubbleEl;
+}
+function showBubble(id, text) {
+  const s = findSprite(id);
+  if (!s) return;
+  const b = _ensureBubble(s);
+  b.classList.remove("thinking");
+  const t = truncate(text, BUBBLE_MAX);
+  b.textContent = t;
+  // Anything longer than a short single word gets a min-width so it doesn't look
+  // empty, very short messages like "ok" / "ready" stay tight.
+  b.classList.toggle("has-content", t.length > 8);
+}
+// "..." with a soft pulse, used while a pokemon is producing a reply.
+function setThinkingBubble(id) {
+  const s = findSprite(id);
+  if (!s) return;
+  const b = _ensureBubble(s);
+  b.textContent = "…";
+  b.classList.add("thinking");
+}
+// Bubble update + mirror entry in the chat log (so the log keeps history;
+// bubble only shows latest). Used when an update lands outside the active dialog.
+// `summary` is the short bubble text; `fullBody` is the complete response (if any).
+// If fullBody contains more than summary, we add a (more) tag in the chat-log entry.
+// When this pokemon already has multiple unreads, the BUBBLE collapses to a count
+// ("You have N messages") even though the chat log still gets a fresh per-event entry.
+function surfaceUpdate(pokemonId, summary, fullBody) {
+  showBubble(pokemonId, bubbleTextForUnread(pokemonId, summary));
+  const p = ROSTER.find(x => x.id === pokemonId);
+  const t = truncate(summary, BUBBLE_MAX);
+  const hasMore = !!fullBody && fullBody.trim() !== t.trim();
+  if (p) appendLog(p.name, t, p.accent, p.id, hasMore);
+}
+function clearBubble(id) {
+  const s = findSprite(id);
+  if (s && s.bubbleEl) { s.bubbleEl.remove(); s.bubbleEl = null; }
+}
+function refreshBubble(id) {
+  const unread = unreadAssistantTurns(id);
+  if (unread.length === 0) { clearBubble(id); return; }
+  const latest = unread[unread.length - 1];
+  if (latest.streaming) { setThinkingBubble(id); return; }
+  if (unread.length > 1) {
+    showBubble(id, `You have ${unread.length} messages`);
+  } else {
+    showBubble(id, latest.summary || latest.body || "ready");
+  }
+}
+// Pick bubble text given the current unread state, collapses multi-unread
+// down to a count, otherwise shows the freshest summary.
+function bubbleTextForUnread(pokemonId, fallbackSummary) {
+  const unread = unreadAssistantTurns(pokemonId);
+  if (unread.length > 1) return `You have ${unread.length} messages`;
+  return truncate(fallbackSummary || "ready", BUBBLE_MAX);
+}
+function restoreBubbles() {
+  for (const p of ROSTER) refreshBubble(p.id);
+}
+
+// ─── SSE consumer over fetch response body ────────────────────────────────
+async function readSSE(stream, onEvent) {
+  const reader = stream.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const block = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let event = "message", data = "";
+      for (const ln of block.split("\n")) {
+        if (ln.startsWith("event:"))      event = ln.slice(6).trim();
+        else if (ln.startsWith("data:"))  data += ln.slice(5).trim();
+      }
+      if (data) {
+        try { onEvent(event, JSON.parse(data)); } catch { /* skip malformed */ }
+      }
+    }
+  }
+}
+
+// ─── zoom ─────────────────────────────────────────────────────────────────
+let _zoom = 1;
+const ZOOM_MIN = 0.05, ZOOM_MAX = 3;
+function applyZoom() {
+  if (!building.naturalWidth) return;
+  // transform: scale on inner stage (visual scale, includes grass + everything).
+  // Outer wrapper takes the SCALED size so flex/scrollbars track correctly.
+  const w = parseFloat(stage.style.width)  || (building.naturalWidth  * PAD_MULT);
+  const h = parseFloat(stage.style.height) || (building.naturalHeight * PAD_MULT);
+  stage.style.transform = `scale(${_zoom})`;
+  stageOuter.style.width  = (w * _zoom) + "px";
+  stageOuter.style.height = (h * _zoom) + "px";
+}
+function setZoom(z) {
+  _zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  applyZoom();
+}
+
+// Home button: reset zoom AND scroll back to the centered building
+function resetView() {
+  setZoom(1);
+  requestAnimationFrame(scrollToBuildingCenter);
+}
+window.resetView = resetView;
+
+// Zoom while keeping the world point at viewport center anchored, no jump.
+function zoomBy(f) {
+  // Pre-zoom: record center of viewport as a fraction of the scrollable area.
+  const beforeW = _world.scrollWidth  || 1;
+  const beforeH = _world.scrollHeight || 1;
+  const fracX = (_world.scrollLeft + _world.clientWidth  / 2) / beforeW;
+  const fracY = (_world.scrollTop  + _world.clientHeight / 2) / beforeH;
+
+  setZoom(_zoom * f);
+
+  // Post-zoom (next frame, after layout settles): restore the same center.
+  requestAnimationFrame(() => {
+    _world.scrollLeft = fracX * _world.scrollWidth  - _world.clientWidth  / 2;
+    _world.scrollTop  = fracY * _world.scrollHeight - _world.clientHeight / 2;
+  });
+}
+window.setZoom = setZoom; window.zoomBy = zoomBy;
+
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if (e.key === "+" || e.key === "=") { zoomBy(1.1); e.preventDefault(); }
+  if (e.key === "-" || e.key === "_") { zoomBy(0.9); e.preventDefault(); }
+  if (e.key === "0") { resetView(); e.preventDefault(); }
+});
+
+const _world = document.getElementById("world");
+_world?.addEventListener("wheel", e => {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  // Lower-sensitivity wheel zoom, trackpad pinches fire many ticks per gesture.
+  zoomBy(e.deltaY < 0 ? 1.03 : 0.97);
+}, { passive: false });
+
+// ─── chat panel resize (drag the top edge to adjust height) ──────────────
+(() => {
+  const ts = document.getElementById("townsquare");
+  const handle = ts?.querySelector(".resize-handle");
+  if (!ts || !handle) return;
+
+  // Remember last height across reloads.
+  const saved = parseInt(localStorage.getItem("arena.chatHeight") || "", 10);
+  if (saved && saved > 80) ts.style.flex = `0 0 ${saved}px`;
+
+  handle.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = ts.getBoundingClientRect().height;
+    document.body.classList.add("resizing-townsquare");
+    const onMove = (ev) => {
+      const dy = startY - ev.clientY;     // drag up = grow
+      const next = Math.max(80, Math.min(window.innerHeight - 120, startH + dy));
+      ts.style.flex = `0 0 ${next}px`;
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("resizing-townsquare");
+      const h = Math.round(ts.getBoundingClientRect().height);
+      localStorage.setItem("arena.chatHeight", String(h));
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
+})();
+
+// ─── click-and-drag pan ──────────────────────────────────────────────────
+let _drag = null;
+const DRAG_THRESHOLD = 5;
+_world?.addEventListener("mousedown", e => {
+  if (e.target.closest("button, input, textarea, .dialog, #zoom-controls, .sprite")) return;
+  if (e.button !== 0) return;
+  _drag = { startX: e.pageX, startY: e.pageY,
+    scrollLeft: _world.scrollLeft, scrollTop: _world.scrollTop, moved: 0 };
+});
+document.addEventListener("mousemove", e => {
+  if (!_drag) return;
+  const dx = e.pageX - _drag.startX, dy = e.pageY - _drag.startY;
+  _drag.moved = Math.max(_drag.moved, Math.hypot(dx, dy));
+  if (_drag.moved > DRAG_THRESHOLD) {
+    _world.classList.add("dragging");
+    _world.scrollLeft = _drag.scrollLeft - dx;
+    _world.scrollTop  = _drag.scrollTop  - dy;
+  }
+});
+document.addEventListener("mouseup", () => {
+  if (!_drag) return;
+  const wasDrag = _drag.moved > DRAG_THRESHOLD;
+  _drag = null;
+  _world.classList.remove("dragging");
+  if (wasDrag) {
+    const swallow = ev => { ev.stopPropagation(); ev.preventDefault();
+      window.removeEventListener("click", swallow, true); };
+    window.addEventListener("click", swallow, true);
+  }
+});
+
+// ─── dialog ────────────────────────────────────────────────────────────────
+// activeDialog is the pokemon currently rendered. Streams keep running even when activeDialog is null
+// (i.e. dialog was closed), they continue mutating the transcript array; bubbles surface "ready" on done.
+let activeDialog = null;
+
+function renderMarkdown(text) {
+  // marked is configured for github-flavored markdown w/ line-break newlines.
+  return window.marked ? marked.parse(text || "", { breaks: true, gfm: true }) : escapeHtml(text || "");
+}
+
+// Inline SVG icons for the copy button. Default = clipboard at 50% opacity, → checkmark on success.
+const ICON_COPY = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="copy"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const ICON_CHECK = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-label="copied"><polyline points="20 6 9 17 4 12"/></svg>';
+
+function enhanceCodeBlocks(rootEl) {
+  rootEl.querySelectorAll("pre").forEach(pre => {
+    if (pre.dataset.enhanced) return;
+    pre.dataset.enhanced = "1";
+    const btn = document.createElement("button");
+    btn.className = "copy-btn";
+    btn.type = "button";
+    btn.title = "copy";
+    btn.innerHTML = ICON_COPY;
+    btn.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      const codeEl = pre.querySelector("code");
+      const code = codeEl ? codeEl.textContent : pre.textContent;
+      try {
+        await navigator.clipboard.writeText(code);
+        btn.innerHTML = ICON_CHECK;
+        btn.title = "copied";
+      } catch {
+        btn.title = "copy failed";
+      }
+      setTimeout(() => { btn.innerHTML = ICON_COPY; btn.title = "copy"; }, 1200);
+    });
+    pre.appendChild(btn);
+  });
+}
+
+// Fill a row's content cell. User rows are plain text; agent rows render markdown.
+function setRowContent(el, text, isUser) {
+  if (isUser) {
+    el.textContent = text;
+  } else {
+    el.innerHTML = renderMarkdown(text);
+    enhanceCodeBlocks(el);
+  }
+}
+
+// Toggle .multiline on the row when content occupies more than one line.
+// Used to show/hide the bullet's accent thread-line below the dot.
+function markMultiline(row) {
+  if (!row) return;
+  const content = row.querySelector(".content");
+  if (!content) return;
+  const cs = getComputedStyle(content);
+  const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4;
+  row.classList.toggle("multiline", content.offsetHeight > lh * 1.4);
+}
+
+// Build a chat-row: bullet + (optional) name + content + time.
+// Modal hides the name via CSS; group chat shows both.
+function makeChatRow({ who, accent, pokemonId, at, isUser, isSystem }) {
+  const r = document.createElement("div");
+  r.className = "chat-row" + (isUser ? " user" : "") + (isSystem ? " system" : "");
+  if (isSystem) return r;
+
+  const dot = document.createElement("span");
+  dot.className = "bullet";
+  if (accent) dot.style.color = accent;
+  if (pokemonId) dot.dataset.pokemon = pokemonId;     // clickable like the name
+  r.appendChild(dot);
+
+  if (who) {
+    const w = document.createElement("span");
+    w.className = "who";
+    if (accent) w.style.color = accent;
+    if (pokemonId) w.dataset.pokemon = pokemonId;
+    w.textContent = who;
+    r.appendChild(w);
+  }
+
+  const c = document.createElement("div");
+  c.className = "content";
+  r.appendChild(c);
+
+  const t = document.createElement("span");
+  t.className = "ts";
+  if (at) t.textContent = fmtTime(at);
+  r.appendChild(t);
+
+  return r;
+}
+
+function fmtTime(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  let h = d.getHours();
+  const m = d.getMinutes().toString().padStart(2, "0");
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return `${h}:${m} ${ap}`;
+}
+
+function appendDialogMsg(p, text, isUser, turnIdx, at) {
+  const body = document.getElementById("dialog-body");
+  // Modal rows use an accent-colored bullet (the modal header already shows
+  // whose chat this is, so the name is hidden via CSS). Justin gets a white bullet.
+  const accent = isUser ? "#ffffff" : p.accent;
+  const r = makeChatRow({ accent, at, isUser });
+  if (typeof turnIdx === "number") r.dataset.turnIdx = String(turnIdx);
+  setRowContent(r.querySelector(".content"), text, isUser);
+  body.appendChild(r);
+  markMultiline(r);
+  return r;
+}
+
+// Build dialog body from persisted transcript. Returns the first-unread .msg el (or null).
+function renderTranscript(p) {
+  const body = document.getElementById("dialog-body");
+  body.innerHTML = "";
+  const turns = getTranscript(p.id);
+  if (turns.length === 0) {
+    // First-ever open, show greet (ephemeral, not persisted).
+    appendDialogMsg(p, p.greet, false);
+    return null;
+  }
+  let firstUnread = null;
+  const lr = getLastRead(p.id);
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i];
+    const text = t.body || (t.streaming ? "…" : "");
+    // No timestamp until the turn has settled (assistant streaming → at:0).
+    const at = t.streaming ? 0 : (t.at || 0);
+    const el = appendDialogMsg(p, text, t.role === "user", i, at);
+    if (!firstUnread && t.role === "assistant" && (t.at || 0) > lr) firstUnread = el;
+  }
+  return firstUnread;
+}
+
+function openDialog(p) {
+  activeDialog = p;
+  const avatarImg = document.getElementById("dialog-img");
+  avatarImg.src = `${SPRITE_DIR}/${p.id}.png`;
+  const av = p.avatar || { scale: 2.4, originX: 50, originY: 22 };
+  avatarImg.style.transform       = `scale(${av.scale})`;
+  avatarImg.style.transformOrigin = `${av.originX}% ${av.originY}%`;
+  document.getElementById("dialog").style.setProperty("--agent-accent", p.accent);
+  const nm = document.getElementById("dialog-name");
+  nm.textContent = p.name;
+  nm.style.color = "";
+  document.getElementById("dialog-role").textContent = p.role;
+
+  const firstUnread = renderTranscript(p);
+  markRead(p.id);
+  clearBubble(p.id);
+
+  document.getElementById("modal-backdrop").classList.add("open");
+  setTimeout(() => {
+    if (firstUnread) firstUnread.scrollIntoView({ block: "start", behavior: "auto" });
+    else {
+      const body = document.getElementById("dialog-body");
+      body.scrollTop = body.scrollHeight;
+    }
+    document.getElementById("dialog-input").focus();
+  }, 50);
+}
+
+function closeDialog() {
+  document.getElementById("modal-backdrop").classList.remove("open");
+  activeDialog = null;
+  // Intentionally do NOT abort in-flight streams, they keep writing to transcripts;
+  // refreshBubble surfaces "ready"/summary on done. Open another pokemon while one finishes.
+}
+
+// If the dialog is currently showing this pokemon, reflect a turn's current text + timestamp in DOM.
+function paintTurn(pokemonId, turnIdx) {
+  if (!activeDialog || activeDialog.id !== pokemonId) return;
+  const body = document.getElementById("dialog-body");
+  const row = body.querySelector(`.chat-row[data-turn-idx="${turnIdx}"]`);
+  if (!row) return;
+  const turn = getTranscript(pokemonId)[turnIdx];
+  if (!turn) return;
+  const c = row.querySelector(".content");
+  if (c) {
+    const text = turn.body || (turn.streaming ? "…" : "");
+    setRowContent(c, text, turn.role === "user");
+  }
+  // Timestamp populated once the turn settles (assistant streaming → at:0).
+  const tsEl = row.querySelector(".ts");
+  if (tsEl) {
+    tsEl.textContent = (turn.at && !turn.streaming) ? fmtTime(turn.at) : "";
+  }
+  markMultiline(row);
+  body.scrollTop = body.scrollHeight;
+}
+
+async function sendDialog(e) {
+  e.preventDefault();
+  const inp = document.getElementById("dialog-input");
+  const t = inp.value.trim();
+  if (!t || !activeDialog) return;
+  const p = activeDialog;
+  inp.value = "";
+
+  pushTurn(p.id, { role: "user", body: t, at: Date.now(), source: "chat" });
+  const replyIdx = pushTurn(p.id, { role: "assistant", body: "", at: 0, streaming: true, source: "chat" });
+  renderTranscript(p);
+  const dlgBody = document.getElementById("dialog-body");
+  dlgBody.scrollTop = dlgBody.scrollHeight;
+
+  // Show "thinking" bubble on the sprite immediately. Hidden behind the modal
+  // backdrop while the dialog is open; visible if the user closes mid-stream.
+  setThinkingBubble(p.id);
+
+  try {
+    const res = await fetch(`/chat/${p.id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: t, sessionId: getSession(p.id) }),
+    });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+    let acc = "";
+    await readSSE(res.body, (event, data) => {
+      if (event === "session" && data.sessionId) {
+        setSession(p.id, data.sessionId);
+      } else if (event === "delta" && data.text) {
+        acc += data.text;
+        updateTurn(p.id, replyIdx, { body: acc });
+        paintTurn(p.id, replyIdx);
+      } else if (event === "done") {
+        if (!acc && data.result) acc = data.result;
+        updateTurn(p.id, replyIdx, { body: acc, streaming: false, at: Date.now() });
+        paintTurn(p.id, replyIdx);
+      }
+    });
+  } catch (err) {
+    updateTurn(p.id, replyIdx, { body: `[error: ${err.message}]`, streaming: false, at: Date.now() });
+    paintTurn(p.id, replyIdx);
+  } finally {
+    const turn = getTranscript(p.id)[replyIdx];
+    const fullBody = turn?.body || "";
+    const replySnippet = truncate(fullBody || "ready", BUBBLE_MAX);
+    const hasMore = !!fullBody && fullBody.trim().length > replySnippet.trim().length;
+    // Always mirror the question + reply into the group chat as a quote-reply,
+    // so the chat is a coherent record across personal-modal conversations.
+    appendLogReply(truncate(t, BUBBLE_MAX), p.name, replySnippet, p.accent, p.id, hasMore);
+    if (activeDialog && activeDialog.id === p.id) {
+      // Dialog is still open and viewing this pokemon, they've read it live.
+      markRead(p.id);
+      clearBubble(p.id); // drop the "thinking" bubble, they read it in the modal
+    } else {
+      // User moved on; collapse the bubble to a count when multiple are queued.
+      showBubble(p.id, bubbleTextForUnread(p.id, replySnippet));
+    }
+  }
+}
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") closeDialog();
+});
+
+// ─── town square ──────────────────────────────────────────────────────────
+const log = document.getElementById("log");
+// Parse @mentions (e.g. "@bulbasaur", "@team") from raw text. Returns a set of
+// lowercased ids, pokemon ids match a roster entry; "team" is the broadcast-all.
+function parseMentions(raw) {
+  const out = new Set();
+  for (const m of (raw || "").matchAll(/@([a-z]+)\b/gi)) {
+    const id = m[1].toLowerCase();
+    if (id === "team" || ROSTER.some(p => p.id === id)) out.add(id);
+  }
+  return out;
+}
+// Escape free text and render @mentions as colored spans (pokemon accent or team-white).
+function renderMentions(raw) {
+  const re = /@([a-z]+)\b/gi;
+  const out = [];
+  let last = 0;
+  for (const m of (raw || "").matchAll(re)) {
+    out.push(escapeHtml(raw.slice(last, m.index)));
+    const id = m[1].toLowerCase();
+    if (id === "team") {
+      out.push(`<span class="mention mention-team">@team</span>`);
+    } else {
+      const p = ROSTER.find(x => x.id === id);
+      if (p) out.push(`<span class="mention" style="color:${p.accent}">@${p.id}</span>`);
+      else out.push(escapeHtml(m[0]));
+    }
+    last = m.index + m[0].length;
+  }
+  out.push(escapeHtml(raw.slice(last)));
+  return out.join("");
+}
+
+function _moreTag(hasMore, pokemonId) {
+  if (!hasMore) return "";
+  const attrs = pokemonId ? ` data-pokemon="${pokemonId}"` : "";
+  return `<button type="button" class="has-more"${attrs} title="open full message">more</button>`;
+}
+
+// ─── Group chat persistence ──────────────────────────────────────────────
+// arena.log is an array of typed entries; we render the same way live and on restore.
+const LS_LOG = "arena.log";
+const LOG_CAP = 200;                // cap for unbounded growth
+function _logLoad() { try { return JSON.parse(localStorage.getItem(LS_LOG) || "[]"); } catch { return []; } }
+function _logSave(arr) { localStorage.setItem(LS_LOG, JSON.stringify(arr)); }
+function _logPush(entry) {
+  const arr = _logLoad();
+  arr.push(entry);
+  while (arr.length > LOG_CAP) arr.shift();
+  _logSave(arr);
+}
+
+function _renderLogEntry(e) {
+  if (e.kind === "system") {
+    const r = makeChatRow({ isSystem: true });
+    r.textContent = e.text;
+    log.appendChild(r);
+    return r;
+  }
+  // No pokemonId on a chat-log entry → it's Justin (the user) talking.
+  const isUser = !e.pokemonId;
+  const r = makeChatRow({ who: e.who, accent: e.accent, pokemonId: e.pokemonId, at: e.at, isUser });
+  let html = "";
+  if (e.kind === "logReply") html += `<div class="quote">${renderMentions(e.quote)}</div>`;
+  html += renderMentions(e.text) + _moreTag(e.hasMore, e.pokemonId);
+  r.querySelector(".content").innerHTML = html;
+  log.appendChild(r);
+  return r;
+}
+
+function appendLog(who, text, accent, pokemonId, hasMore) {
+  const entry = { kind: "log", who, text, accent, pokemonId, hasMore, at: Date.now() };
+  _renderLogEntry(entry);
+  _logPush(entry);
+  log.scrollTop = log.scrollHeight;
+}
+// Like appendLog, but with the user's question quoted above the response so
+// chat readers have context for what was asked in a personal modal.
+function appendLogReply(quote, who, text, accent, pokemonId, hasMore) {
+  const entry = { kind: "logReply", quote, who, text, accent, pokemonId, hasMore, at: Date.now() };
+  _renderLogEntry(entry);
+  _logPush(entry);
+  log.scrollTop = log.scrollHeight;
+}
+
+// Replay persisted entries on load so the chat survives refresh.
+function restoreLog() {
+  for (const e of _logLoad()) _renderLogEntry(e);
+  log.scrollTop = log.scrollHeight;
+}
+restoreLog();
+
+// Click a name OR a (more) pill in chat → open that pokemon's dialog
+log.addEventListener("click", (ev) => {
+  const t = ev.target.closest("[data-pokemon]");
+  if (!t) return;
+  const p = ROSTER.find(x => x.id === t.dataset.pokemon);
+  if (p) openDialog(p);
+});
+
+function appendSystem(text) {
+  const entry = { kind: "system", text, at: Date.now() };
+  _renderLogEntry(entry);
+  _logPush(entry);
+  log.scrollTop = log.scrollHeight;
+}
+async function sendBroadcast(e) {
+  e.preventDefault();
+  const inp = document.getElementById("broadcast-input");
+  const t = inp.value.trim();
+  if (!t) return;
+  appendLog("Justin", t, "#fff");
+  inp.value = "";
+  inp.disabled = true;
+
+  const sessions = {};
+  for (const p of ROSTER) {
+    const sid = getSession(p.id);
+    if (sid) sessions[p.id] = sid;
+  }
+  const mentions = [...parseMentions(t)];
+
+  try {
+    const res = await fetch("/broadcast", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: t, sessions, mentions }),
+    });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+    await readSSE(res.body, (event, data) => {
+      if (event === "thinking") {
+        showBubble(data.pokemon, "…");
+      } else if (event === "pass") {
+        // Refresh from real unread state so we don't wipe a bubble that was already there.
+        if (data.sessionId) setSession(data.pokemon, data.sessionId);
+        refreshBubble(data.pokemon);
+      } else if (event === "response") {
+        if (data.sessionId) setSession(data.pokemon, data.sessionId);
+        // Mirror the broadcast into this pokemon's transcript so opening their dialog shows the thread.
+        pushTurn(data.pokemon, { role: "user", body: t, at: Date.now(), source: "broadcast" });
+        pushTurn(data.pokemon, {
+          role: "assistant", body: data.body, summary: data.summary,
+          at: Date.now(), source: "broadcast",
+        });
+        if (activeDialog && activeDialog.id === data.pokemon) {
+          renderTranscript(activeDialog);
+          markRead(data.pokemon);
+          clearBubble(data.pokemon);
+        } else {
+          surfaceUpdate(data.pokemon, data.summary, data.body);
+        }
+      }
+    });
+  } catch (err) {
+    appendSystem(`✗ broadcast failed: ${err.message}`);
+  } finally {
+    inp.disabled = false;
+    inp.focus();
+  }
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+</script>
+</body>
+</html>

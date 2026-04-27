@@ -1,0 +1,15 @@
+{
+  "name": "pokemon-center",
+  "version": "0.1.0",
+  "description": "A 9-agent themed Claude Code team with a web UI. Each agent is a `claude --agent <id>` session with its own persona and accent color.",
+  "type": "module",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,15 @@
+node_modules/
+.DS_Store
+*.log
+.env
+.env.local
+.vscode/
+.idea/
+
+# Local override config — users can drop their own roster here without committing.
+# Keep public/config.json under version control as the example/default.
+public/config.local.json
+
+# Local-only working dirs
+.tmp/
+tmp/
