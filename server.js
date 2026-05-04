@@ -12,11 +12,16 @@ import path from "node:path";
 import url from "node:url";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { appendMessage, getHistory, search } from "./db.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_ROOT = path.join(HERE, "public");
 const CONFIG_PATH = path.join(STATIC_ROOT, "config.json");
 const PORT = Number(process.env.PORT) || 8765;
+// Tag every persisted entry with a project name so the shared DB can be
+// scoped/aggregated later. Defaults to the basename of the directory the
+// server was started from. Override with ARENA_PROJECT.
+const PROJECT = process.env.ARENA_PROJECT || path.basename(process.cwd()) || "arena";
 // Each spawned `claude` runs with $HOME as cwd so agents can read/grep across
 // any project under your home directory. Override with ARENA_CWD if you'd rather
 // scope the session somewhere narrower.
@@ -39,13 +44,19 @@ const MIME = {
   ".webp": "image/webp",
 };
 
+const FORMAT_RULES =
+  `Use plain text or markdown only (lists, **bold**, *italic*, \`code\`, links). \
+Do NOT emit raw HTML tags — they will not render and will appear as literal markup in the group chat.`;
+
 const BROADCAST_WRAPPER = (msg) =>
   `[@team broadcast]
 ${msg}
 
 If this is not in your lane, respond with exactly: PASS
 
-Otherwise: line 1 must be "SUMMARY: <one short line in your dialect>", then a blank line, then your full response in character.`;
+Otherwise: line 1 must be "SUMMARY: <one short line in your dialect>", then a blank line, then your full response in character.
+
+${FORMAT_RULES}`;
 
 // Force-respond variant: used when this agent was @-mentioned (or @team).
 // They MUST respond, no PASS allowed.
@@ -55,7 +66,9 @@ ${msg}
 
 You were explicitly tagged. You MUST respond, do not output PASS even if it's outside your usual lane.
 
-Format: line 1 must be "SUMMARY: <one short line in your dialect>", then a blank line, then your full response in character.`;
+Format: line 1 must be "SUMMARY: <one short line in your dialect>", then a blank line, then your full response in character.
+
+${FORMAT_RULES}`;
 
 // Stub seam for future ambient checks (Linear, Gmail, GitHub PRs, deploys, etc).
 // Returns array of { summary, body, at } per agent since lastReadAt.
@@ -64,7 +77,16 @@ function laneCheck(_agentId) {
 }
 
 function spawnClaude({ agent, message, sessionId }) {
-  const args = ["--print", "--output-format=stream-json", "--verbose", "--agent", agent];
+  // bypassPermissions: agents run non-interactively, so any permission prompt
+  // (e.g. Bash(gh:*)) would stall the spawn forever. Local-trusted arena —
+  // each agent's tool surface is already scoped by its frontmatter `tools:` list.
+  const args = [
+    "--print",
+    "--output-format=stream-json",
+    "--verbose",
+    "--permission-mode", "bypassPermissions",
+    "--agent", agent,
+  ];
   if (sessionId) args.push("--resume", sessionId);
   args.push(message);
   return spawn("claude", args, {
@@ -128,6 +150,7 @@ async function handleChat(req, res, agent) {
 
   sseInit(res);
   let firstSession = false;
+  let firstDelta = true;
   const child = spawnClaude({ agent, message, sessionId });
 
   streamLines(child, (evt) => {
@@ -135,10 +158,19 @@ async function handleChat(req, res, agent) {
       firstSession = true;
       sseEvent(res, "session", { sessionId: evt.session_id });
     } else if (evt.type === "assistant") {
+      // Join multiple text blocks within one message with \n\n (tool_use blocks
+      // between text blocks otherwise collapse paragraph boundaries). Also
+      // separate consecutive assistant events with \n\n so sub-agent (Task)
+      // outputs don't smash into the parent's text.
       const text = (evt.message?.content || [])
         .map((c) => c?.text || "")
-        .join("");
-      if (text) sseEvent(res, "delta", { text });
+        .filter(Boolean)
+        .join("\n\n");
+      if (text) {
+        const out = firstDelta ? text : "\n\n" + text;
+        firstDelta = false;
+        sseEvent(res, "delta", { text: out });
+      }
     } else if (evt.type === "result") {
       sseEvent(res, "done", { ok: !evt.is_error, result: evt.result || "" });
     }
@@ -163,14 +195,23 @@ async function handleBroadcast(req, res) {
   if (!message) { res.writeHead(400); res.end("missing message"); return; }
 
   sseInit(res);
-  for (const a of AGENTS) sseEvent(res, "thinking", { pokemon: a });
 
-  // @team forces every agent to respond. A specific @<id> forces only that one.
+  // Routing rules for who actually gets spawned this turn:
+  //   - @team in mentions → fan out to every agent (forced response).
+  //   - any other @<id> mentions → spawn ONLY those, forced response.
+  //   - no mentions → fan out to every agent in PASS-allowed mode (today's default).
+  // This keeps an unrelated `@sylveon` from waking up groudon/machamp/etc.
   const teamForce = mentions.has("team");
+  const directMentions = [...mentions].filter((m) => m !== "team" && AGENTS.includes(m));
+  const targetedRun = !teamForce && directMentions.length > 0;
+  const targets = targetedRun ? directMentions : AGENTS;
+
+  for (const a of targets) sseEvent(res, "thinking", { pokemon: a });
+
   const wrappedFor = (a) =>
     (teamForce || mentions.has(a)) ? FORCE_WRAPPER(message) : BROADCAST_WRAPPER(message);
 
-  await Promise.all(AGENTS.map((a) => new Promise((resolve) => {
+  await Promise.all(targets.map((a) => new Promise((resolve) => {
     const child = spawnClaude({ agent: a, message: wrappedFor(a), sessionId: sessions[a] });
     let captured = "";
     let newSessionId = null;
@@ -204,6 +245,58 @@ async function handleBroadcast(req, res) {
   res.end();
 }
 
+function sendJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+async function handleLogAppend(req, res) {
+  let body;
+  try { body = await readJsonBody(req); }
+  catch { res.writeHead(400); res.end("bad json"); return; }
+  const kind = String(body.kind || "").trim();
+  if (!kind) { res.writeHead(400); res.end("missing kind"); return; }
+  const id = appendMessage({
+    accent:    body.accent,
+    at:        Number(body.at) || Date.now(),
+    hasMore:   !!body.hasMore,
+    kind,
+    pokemonId: body.pokemonId,
+    project:   body.project || PROJECT,
+    quote:     body.quote,
+    sessionId: body.sessionId,
+    text:      String(body.text || ""),
+    who:       body.who,
+  });
+  sendJson(res, 200, { id: Number(id), ok: true });
+}
+
+function handleHistory(req, res, query) {
+  const project = query.project ?? PROJECT;
+  const before  = query.before ? Number(query.before) : undefined;
+  const limit   = query.limit  ? Number(query.limit)  : 200;
+  sendJson(res, 200, { entries: getHistory({ project: project || undefined, before, limit }) });
+}
+
+function handleSearch(req, res, query) {
+  const q       = String(query.q || "");
+  const project = query.project ?? PROJECT;
+  const limit   = query.limit ? Number(query.limit) : 50;
+  if (!q.trim()) return sendJson(res, 200, { results: [] });
+  try {
+    const results = search({ q, project: project || undefined, limit });
+    sendJson(res, 200, { results });
+  } catch (e) {
+    // FTS5 throws on malformed match expressions ("foo:" etc) — surface as 400.
+    sendJson(res, 400, { error: String(e.message || e) });
+  }
+}
+
 function serveStatic(req, res) {
   let p = decodeURIComponent(url.parse(req.url).pathname);
   if (p === "/") p = "/index.html";
@@ -222,17 +315,26 @@ function serveStatic(req, res) {
 }
 
 const server = http.createServer((req, res) => {
-  const u = url.parse(req.url);
+  const u = url.parse(req.url, true);
   if (req.method === "POST" && u.pathname.startsWith("/chat/")) {
     return handleChat(req, res, u.pathname.slice("/chat/".length));
   }
   if (req.method === "POST" && u.pathname === "/broadcast") {
     return handleBroadcast(req, res);
   }
+  if (req.method === "POST" && u.pathname === "/log") {
+    return handleLogAppend(req, res);
+  }
+  if (req.method === "GET" && u.pathname === "/history") {
+    return handleHistory(req, res, u.query);
+  }
+  if (req.method === "GET" && u.pathname === "/search") {
+    return handleSearch(req, res, u.query);
+  }
   if (req.method === "GET") return serveStatic(req, res);
   res.writeHead(405); res.end("method not allowed");
 });
 
 server.listen(PORT, () => {
-  console.log(`pokemon-center: http://localhost:${PORT}/   (agents: ${AGENTS.join(", ")})`);
+  console.log(`pokemon-center: http://localhost:${PORT}/   (project: ${PROJECT}, agents: ${AGENTS.join(", ")})`);
 });

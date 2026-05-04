@@ -245,6 +245,22 @@
     box-shadow: 0 0 8px #4ade80;
     animation: pulse 1.6s ease-in-out infinite;
   }
+  #townsquare header .clear-bubbles {
+    margin-left: auto;
+    background: transparent;
+    color: #6b7494;
+    border: 1px solid #2a3550;
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  #townsquare header .clear-bubbles:hover { color: #e8eaf0; border-color: #3a4570; }
   @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
   #log {
     flex: 1 1 auto;
@@ -309,11 +325,22 @@
   }
   /* Hide the trailing line for single-line rows, only longer messages get a line. */
   .chat-row:not(.multiline) .bullet::after { display: none; }
-  /* Justin's own rows sit at 50% opacity so the agents are the focus.
-     (Time stays at its base opacity, no double-dim.) */
+  /* Consecutive rows from the same speaker hide the bullet's dot and the name
+     so a run of messages reads as one quieter cluster. The .who keeps its box
+     (visibility: hidden) so the content column stays aligned across rows. */
+  #log .chat-row.continued .bullet::before { visibility: hidden; }
+  #log .chat-row.continued .who { visibility: hidden; }
+  /* Justin's own rows sit muted so the agents are the focus.
+     (Time stays at its base opacity, no double-dim.)
+     We dim `.content` via *color*, not opacity — opacity composites onto
+     children and would wash out the pokemon-accent colored mention spans
+     inside the message. The bullet + name keep `opacity` since they have
+     no children we care about. */
   .dialog .body .chat-row.user .content,
+  #log .chat-row.user .content {
+    color: rgba(232, 234, 240, 0.5);
+  }
   .dialog .body .chat-row.user .bullet,
-  #log .chat-row.user .content,
   #log .chat-row.user .who,
   #log .chat-row.user .bullet {
     opacity: 0.5;
@@ -338,11 +365,13 @@
   }
   .chat-row .content > *:first-child { margin-top: 0; }
   .chat-row .content > *:last-child  { margin-bottom: 0; }
-  .chat-row .who[data-pokemon] {
+  .chat-row .who[data-pokemon],
+  .chat-row .content .mention[data-pokemon] {
     cursor: pointer;
     transition: opacity 0.15s;
   }
-  .chat-row .who[data-pokemon]:hover { opacity: 0.75; text-decoration: underline; }
+  .chat-row .who[data-pokemon]:hover,
+  .chat-row .content .mention[data-pokemon]:hover { opacity: 0.75; text-decoration: underline; }
   .chat-row.system {
     grid-column: 1 / -1;
     display: block;
@@ -380,22 +409,136 @@
   }
   .chat-row .mention { font-weight: 700; }
   .chat-row .mention-team { color: #ffffff; font-weight: 700; }
+  /* "working" bar — chips for each pokemon currently producing a reply, so
+     you have a clear visual indicator while the input is locked. Hidden when
+     nothing's in flight. */
+  #working-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 14px;
+    border-top: 1px solid #2a3550;
+    background: #131929;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  #working-bar[hidden] { display: none; }
+  .working-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px 2px 8px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    background: rgba(255, 255, 255, 0.04);
+    /* color set inline with the pokemon's accent */
+  }
+  .working-chip::before {
+    content: "";
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border: 1.5px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: chipSpin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes chipSpin { to { transform: rotate(360deg); } }
+
   #composer {
     display: flex;
     border-top: 1px solid #2a3550;
     background: #131929;
   }
-  #composer input {
+  #composer textarea::placeholder { color: #4a5575; }
+
+  /* Live @mention coloring inside <textarea>s. The actual <textarea> sits on
+     top with transparent text; a sibling .input-mirror behind it mirrors the
+     value with mention spans colored. The caret is on the textarea layer.
+     Padding/font/line-height MUST match between textarea and mirror or the
+     text positions drift. Both auto-grow with content (rows="1" baseline). */
+  .input-wrap {
+    position: relative;
     flex: 1;
+    display: flex;
+    min-width: 0;
+  }
+  .input-wrap textarea {
+    flex: 1;
+    color: transparent !important;
+    caret-color: #e8eaf0;
     background: transparent;
     border: 0;
-    color: #e8eaf0;
-    padding: 10px 14px;
-    font-size: 13px;
-    font-family: inherit;
     outline: none;
+    resize: none;
+    overflow-y: auto;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.4;
+    position: relative;
+    z-index: 1;
+    /* identical wrapping behavior to mirror */
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 160px;
   }
-  #composer input::placeholder { color: #4a5575; }
+  .input-wrap textarea::selection {
+    background: rgba(83, 169, 255, 0.35);
+    color: #e8eaf0;
+  }
+  .input-wrap .input-mirror {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    overflow: hidden;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: #e8eaf0;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.4;
+    z-index: 0;
+  }
+  .input-wrap .input-mirror .mention-team { color: #ffffff; font-weight: 600; }
+  /* padding matches each context's textarea padding so text aligns 1:1 */
+  #composer .input-wrap textarea,
+  #composer .input-mirror { padding: 10px 14px; }
+  .dialog .input .input-wrap textarea,
+  .dialog .input .input-mirror { padding: 12px 18px; }
+
+  /* @-mention autocomplete: floats above the textarea, sized to its content
+     (not the full input width) so it sits as a tight little menu. */
+  .mention-popup {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    margin-bottom: 4px;
+    width: max-content;
+    max-width: 100%;
+    background: #1a2238;
+    border: 1px solid #2a3550;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    overflow: hidden;
+    z-index: 50;
+    max-height: 240px;
+    overflow-y: auto;
+  }
+  .mention-popup[hidden] { display: none; }
+  .mention-option {
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mention-option .mo-id { font-weight: 600; }
+  .mention-option .mo-role { color: #6b7494; font-size: 11px; }
+  .mention-option:hover,
+  .mention-option.selected { background: #2a3550; }
   #composer button {
     background: #2a3550;
     color: #e8eaf0;
@@ -523,10 +666,7 @@
     border-bottom-left-radius: 10px;
     border-bottom-right-radius: 10px;
   }
-  .dialog .input input {
-    flex: 1; background: transparent; border: 0; color: #e8eaf0;
-    padding: 12px 18px; font-size: 13px; font-family: inherit; outline: none;
-  }
+  .dialog .input textarea::placeholder { color: #4a5575; }
 
 
   /* ── Markdown rendering inside the modal's chat content cell ───────── */
@@ -618,10 +758,16 @@
   <header>
     <span class="pulse"></span>
     Chat
+    <button type="button" class="clear-bubbles" onclick="markAllRead()" title="Dismiss all sprite bubbles (Esc)">Clear</button>
   </header>
   <div id="log"></div>
+  <div id="working-bar" hidden></div>
   <form id="composer" onsubmit="sendBroadcast(event)">
-    <input id="broadcast-input" placeholder="@team something… or just type to journal" autocomplete="off" />
+    <div class="input-wrap">
+      <div class="input-mirror" id="broadcast-mirror" aria-hidden="true"></div>
+      <textarea id="broadcast-input" rows="1" placeholder="@team something… or just type to journal" autocomplete="off"></textarea>
+      <div class="mention-popup" id="broadcast-popup" hidden></div>
+    </div>
     <button type="submit">Send</button>
   </form>
 </aside>
@@ -638,7 +784,11 @@
     </header>
     <div class="body" id="dialog-body"></div>
     <form class="input" onsubmit="sendDialog(event)">
-      <input id="dialog-input" placeholder="Type a message…" autocomplete="off" />
+      <div class="input-wrap">
+        <div class="input-mirror" id="dialog-mirror" aria-hidden="true"></div>
+        <textarea id="dialog-input" rows="1" placeholder="Type a message…" autocomplete="off"></textarea>
+        <div class="mention-popup" id="dialog-popup" hidden></div>
+      </div>
     </form>
   </div>
 </div>
@@ -1018,7 +1168,33 @@ let activeDialog = null;
 
 function renderMarkdown(text) {
   // marked is configured for github-flavored markdown w/ line-break newlines.
-  return window.marked ? marked.parse(text || "", { breaks: true, gfm: true }) : escapeHtml(text || "");
+  const html = window.marked ? marked.parse(text || "", { breaks: true, gfm: true }) : escapeHtml(text || "");
+  return openLinksInNewTab(html);
+}
+
+// Strip anything that looks like an HTML tag from raw agent text. Defensive:
+// agents are told to use markdown, not raw HTML, but if one slips through we'd
+// rather drop the tags than render a stray `<span style=...>` as literal text
+// in the chat log. Only matches well-formed-looking tags so legitimate `<` in
+// prose (e.g. `if x < 5`) stays intact.
+const HTML_TAG_RE = /<\/?[a-zA-Z][^>]*?>/g;
+function stripHtmlTags(s) { return String(s || "").replace(HTML_TAG_RE, ""); }
+
+// Bare-URL → anchor. Operates on already-escaped HTML (no leftover < or > to
+// confuse the regex). Stops at common trailing punctuation so a URL at the end
+// of a sentence doesn't include the period.
+const URL_RE = /https?:\/\/[^\s<>"']+[^\s<>"'.,!?;:)\]}]/g;
+function linkifyUrls(escapedHtml) {
+  return escapedHtml.replace(URL_RE, (u) =>
+    `<a href="${u}" target="_blank" rel="noopener noreferrer">${u}</a>`);
+}
+// Force every anchor (whether produced by marked, by linkifyUrls, or by an
+// agent emitting raw HTML) to open in a new tab. Idempotent.
+function openLinksInNewTab(html) {
+  return html.replace(/<a\s+([^>]*)>/gi, (m, attrs) => {
+    if (/\btarget\s*=/i.test(attrs)) return m;
+    return `<a ${attrs} target="_blank" rel="noopener noreferrer">`;
+  });
 }
 
 // Inline SVG icons for the copy button. Default = clipboard at 50% opacity, → checkmark on success.
@@ -1170,13 +1346,17 @@ function openDialog(p) {
   clearBubble(p.id);
 
   document.getElementById("modal-backdrop").classList.add("open");
+  const dlgInp = document.getElementById("dialog-input");
+  dlgInp.value = getDraft(p.id);
+  if (dlgInp._refreshMirror) dlgInp._refreshMirror();
+  autoGrow(dlgInp);
   setTimeout(() => {
     if (firstUnread) firstUnread.scrollIntoView({ block: "start", behavior: "auto" });
     else {
       const body = document.getElementById("dialog-body");
       body.scrollTop = body.scrollHeight;
     }
-    document.getElementById("dialog-input").focus();
+    dlgInp.focus();
   }, 50);
 }
 
@@ -1216,6 +1396,9 @@ async function sendDialog(e) {
   if (!t || !activeDialog) return;
   const p = activeDialog;
   inp.value = "";
+  if (inp._refreshMirror) inp._refreshMirror();
+  autoGrow(inp);
+  clearDraft(p.id);
 
   pushTurn(p.id, { role: "user", body: t, at: Date.now(), source: "chat" });
   const replyIdx = pushTurn(p.id, { role: "assistant", body: "", at: 0, streaming: true, source: "chat" });
@@ -1226,6 +1409,7 @@ async function sendDialog(e) {
   // Show "thinking" bubble on the sprite immediately. Hidden behind the modal
   // backdrop while the dialog is open; visible if the user closes mid-stream.
   setThinkingBubble(p.id);
+  showWorking(p.id);
 
   try {
     const res = await fetch(`/chat/${p.id}`, {
@@ -1253,6 +1437,7 @@ async function sendDialog(e) {
     updateTurn(p.id, replyIdx, { body: `[error: ${err.message}]`, streaming: false, at: Date.now() });
     paintTurn(p.id, replyIdx);
   } finally {
+    hideWorking(p.id);
     const turn = getTranscript(p.id)[replyIdx];
     const fullBody = turn?.body || "";
     const replySnippet = truncate(fullBody || "ready", BUBBLE_MAX);
@@ -1271,8 +1456,52 @@ async function sendDialog(e) {
   }
 }
 
+// Working-bar: shows a pulsing chip for each pokemon that's currently
+// producing a reply. Lives just above the composer so it's still visible
+// when the input is disabled mid-broadcast. Idempotent — calling
+// showWorking/hideWorking for the same id is a no-op past the first.
+const _workingChips = new Map();   // pokemonId → element
+function _workingBarEl() { return document.getElementById("working-bar"); }
+function showWorking(pokemonId) {
+  if (_workingChips.has(pokemonId)) return;
+  const p = ROSTER.find((x) => x.id === pokemonId);
+  if (!p) return;
+  const chip = document.createElement("span");
+  chip.className = "working-chip";
+  chip.style.color = p.accent;
+  chip.textContent = p.name;
+  _workingBarEl().appendChild(chip);
+  _workingChips.set(pokemonId, chip);
+  _workingBarEl().hidden = false;
+}
+function hideWorking(pokemonId) {
+  const chip = _workingChips.get(pokemonId);
+  if (chip) { chip.remove(); _workingChips.delete(pokemonId); }
+  if (_workingChips.size === 0) _workingBarEl().hidden = true;
+}
+function clearWorking() {
+  for (const chip of _workingChips.values()) chip.remove();
+  _workingChips.clear();
+  _workingBarEl().hidden = true;
+}
+
+// Mark every pokemon's outstanding messages as read and drop their sprite
+// bubbles. The chat-log scrollback isn't touched — this only quiets the world
+// view. Idempotent.
+function markAllRead() {
+  for (const p of ROSTER) {
+    markRead(p.id);
+    clearBubble(p.id);
+  }
+}
+
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") closeDialog();
+  if (e.key !== "Escape") return;
+  // If the modal is open, Esc closes it (existing behavior). Otherwise it's
+  // the global "quiet the sprites" shortcut.
+  const modalOpen = document.getElementById("modal-backdrop").classList.contains("open");
+  if (modalOpen) closeDialog();
+  else markAllRead();
 });
 
 // ─── town square ──────────────────────────────────────────────────────────
@@ -1287,24 +1516,51 @@ function parseMentions(raw) {
   }
   return out;
 }
-// Escape free text and render @mentions as colored spans (pokemon accent or team-white).
+// Single regex that catches three things:
+//   1) @team
+//   2) @<id>     (case-insensitive)
+//   3) bare <id> not preceded by `@`     (word-boundary, case-insensitive)
+// We use the agent ids (lowercase) as the alphabet — config.json has names
+// that match the ids 1:1 modulo capitalization, so the i-flag handles "Kyogre".
+function _buildMentionRegex() {
+  const ids = ROSTER.map((p) => p.id).join("|");
+  return new RegExp(
+    `@(?:team|${ids})\\b|(?<![@\\w])(?:${ids})\\b`,
+    "gi",
+  );
+}
+const MENTION_RE = _buildMentionRegex();
+
+function _agentForMatch(text) {
+  const id = text.toLowerCase().replace(/^@/, "");
+  return ROSTER.find((p) => p.id === id) || null;
+}
+
+// Escape free text, render @mentions and bare pokemon names as colored,
+// clickable spans, and linkify bare URLs so chat-log entries (which don't run
+// through marked) still have clickable links opening in a new tab. Strips
+// HTML tags up front — agents emit markdown, any raw HTML they include is
+// dropped rather than shown as literal markup.
 function renderMentions(raw) {
-  const re = /@([a-z]+)\b/gi;
+  const cleaned = stripHtmlTags(raw);
   const out = [];
   let last = 0;
-  for (const m of (raw || "").matchAll(re)) {
-    out.push(escapeHtml(raw.slice(last, m.index)));
-    const id = m[1].toLowerCase();
-    if (id === "team") {
-      out.push(`<span class="mention mention-team">@team</span>`);
+  for (const m of cleaned.matchAll(MENTION_RE)) {
+    out.push(linkifyUrls(escapeHtml(cleaned.slice(last, m.index))));
+    const text = m[0];
+    if (text.toLowerCase() === "@team") {
+      out.push(`<span class="mention mention-team">${escapeHtml(text)}</span>`);
     } else {
-      const p = ROSTER.find(x => x.id === id);
-      if (p) out.push(`<span class="mention" style="color:${p.accent}">@${p.id}</span>`);
-      else out.push(escapeHtml(m[0]));
+      const p = _agentForMatch(text);
+      if (p) {
+        out.push(`<span class="mention" data-pokemon="${p.id}" style="color:${p.accent}">${escapeHtml(text)}</span>`);
+      } else {
+        out.push(escapeHtml(text));
+      }
     }
     last = m.index + m[0].length;
   }
-  out.push(escapeHtml(raw.slice(last)));
+  out.push(linkifyUrls(escapeHtml(cleaned.slice(last))));
   return out.join("");
 }
 
@@ -1314,17 +1570,46 @@ function _moreTag(hasMore, pokemonId) {
   return `<button type="button" class="has-more"${attrs} title="open full message">more</button>`;
 }
 
+// ─── Draft persistence (input safety net) ────────────────────────────────
+// Keep the in-progress message for each chat in localStorage so an accidental
+// refresh / tab-close doesn't lose what you were typing. One slot for the
+// group composer, one per pokemon dialog. Cleared as soon as the message
+// actually sends.
+const LS_DRAFTS = "arena.drafts";
+const DRAFT_BROADCAST = "broadcast";
+function _draftsLoad() { try { return JSON.parse(localStorage.getItem(LS_DRAFTS) || "{}"); } catch { return {}; } }
+function _draftsSave(m) { localStorage.setItem(LS_DRAFTS, JSON.stringify(m)); }
+function getDraft(key) { return _draftsLoad()[key] || ""; }
+function setDraft(key, value) {
+  const m = _draftsLoad();
+  if (value) m[key] = value; else delete m[key];
+  _draftsSave(m);
+}
+function clearDraft(key) { setDraft(key, ""); }
+
 // ─── Group chat persistence ──────────────────────────────────────────────
-// arena.log is an array of typed entries; we render the same way live and on restore.
-const LS_LOG = "arena.log";
-const LOG_CAP = 200;                // cap for unbounded growth
-function _logLoad() { try { return JSON.parse(localStorage.getItem(LS_LOG) || "[]"); } catch { return []; } }
-function _logSave(arr) { localStorage.setItem(LS_LOG, JSON.stringify(arr)); }
+// Entries are typed objects rendered identically live and on restore. Source
+// of truth is the server-side SQLite store (~/.pokemon-center/arena.db) so the
+// log persists across runs and is shared across browsers/projects. The browser
+// keeps no copy beyond what's currently rendered in the DOM.
+const HISTORY_LIMIT = 500;          // backfill window on page load
 function _logPush(entry) {
-  const arr = _logLoad();
-  arr.push(entry);
-  while (arr.length > LOG_CAP) arr.shift();
-  _logSave(arr);
+  // Fire-and-forget: server tags with project + persists. Failures are non-fatal
+  // (the entry is still on screen); we just log so they're visible in devtools.
+  fetch("/log", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(entry),
+  }).catch((err) => console.warn("log persist failed:", err));
+}
+
+// Speaker run-tracking: consecutive entries from the same speaker render
+// quieter (no repeating bullet dot or name). System messages reset the run
+// so a system announcement between two Justin lines breaks the cluster.
+let _lastSpeakerKey = null;
+function _speakerKey(e) {
+  if (e.kind === "system") return null;       // system rows reset the run
+  return e.pokemonId || "_user";
 }
 
 function _renderLogEntry(e) {
@@ -1332,11 +1617,15 @@ function _renderLogEntry(e) {
     const r = makeChatRow({ isSystem: true });
     r.textContent = e.text;
     log.appendChild(r);
+    _lastSpeakerKey = null;
     return r;
   }
   // No pokemonId on a chat-log entry → it's Justin (the user) talking.
   const isUser = !e.pokemonId;
   const r = makeChatRow({ who: e.who, accent: e.accent, pokemonId: e.pokemonId, at: e.at, isUser });
+  const key = _speakerKey(e);
+  if (key && key === _lastSpeakerKey) r.classList.add("continued");
+  _lastSpeakerKey = key;
   let html = "";
   if (e.kind === "logReply") html += `<div class="quote">${renderMentions(e.quote)}</div>`;
   html += renderMentions(e.text) + _moreTag(e.hasMore, e.pokemonId);
@@ -1361,11 +1650,193 @@ function appendLogReply(quote, who, text, accent, pokemonId, hasMore) {
 }
 
 // Replay persisted entries on load so the chat survives refresh.
-function restoreLog() {
-  for (const e of _logLoad()) _renderLogEntry(e);
-  log.scrollTop = log.scrollHeight;
+async function restoreLog() {
+  try {
+    const r = await fetch(`/history?limit=${HISTORY_LIMIT}`);
+    if (!r.ok) throw new Error(`history ${r.status}`);
+    const { entries } = await r.json();
+    for (const e of entries) _renderLogEntry(e);
+    log.scrollTop = log.scrollHeight;
+  } catch (err) {
+    console.warn("history restore failed:", err);
+  }
 }
 restoreLog();
+
+// Live @mention/name coloring: a .input-mirror behind each textarea mirrors
+// the value with mention spans colored. Re-renders on every keystroke and
+// keeps mirror scroll in sync with the textarea's so colors track the caret
+// when the value overflows or wraps.
+function bindMentionMirror(input, mirror) {
+  const update = () => {
+    const v = input.value;
+    // trailing newline doesn't increase the rendered height of an inline div,
+    // so append a zero-width space to force the last empty line to take space
+    mirror.innerHTML = v ? renderMentions(v) + (v.endsWith("\n") ? "&#8203;" : "") : "";
+    mirror.scrollTop = input.scrollTop;
+  };
+  input.addEventListener("input", update);
+  input.addEventListener("scroll", () => { mirror.scrollTop = input.scrollTop; });
+  input._refreshMirror = update;
+  update();
+}
+
+// Auto-grow a <textarea> based on its content, capped by CSS max-height.
+function autoGrow(ta) {
+  ta.style.height = "auto";
+  ta.style.height = ta.scrollHeight + "px";
+}
+
+// Enter submits the parent <form>; Shift+Enter inserts a newline (textarea
+// default). When the autocomplete popup is open it owns Enter — see
+// bindAutocomplete — so this handler bows out then.
+function bindEnterToSubmit(ta, popupEl) {
+  ta.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey) return;
+    if (popupEl && !popupEl.hidden) return;        // popup will accept the suggestion
+    if (e.isComposing) return;                     // IME composition
+    e.preventDefault();
+    if (ta.form && typeof ta.form.requestSubmit === "function") ta.form.requestSubmit();
+    else ta.form?.submit();
+  });
+}
+
+// @-mention autocomplete. Walks back from caret to find an active "@<partial>"
+// token; shows a popup of agents whose id OR name starts with the partial.
+// ↑/↓ navigate, Tab/Enter accept, Esc dismiss, click accept.
+function bindAutocomplete(ta, popup) {
+  let matches = [];
+  let selectedIdx = 0;
+  let tokenStart = -1;
+  let tokenEnd = -1;
+
+  function findActiveToken() {
+    const v = ta.value;
+    const caret = ta.selectionStart;
+    if (caret == null) return null;
+    for (let i = caret - 1; i >= 0; i--) {
+      const ch = v[i];
+      if (ch === "@") {
+        // require @ to be at start or preceded by whitespace, so emails don't trigger
+        if (i === 0 || /\s/.test(v[i - 1])) {
+          const partial = v.slice(i + 1, caret);
+          // valid partial = letters only (no spaces or punctuation)
+          if (!/^[a-zA-Z]*$/.test(partial)) return null;
+          return { start: i, end: caret, partial: partial.toLowerCase() };
+        }
+        return null;
+      }
+      if (/\s/.test(ch)) return null;     // whitespace before any @ → no active token
+    }
+    return null;
+  }
+
+  function render() {
+    if (matches.length === 0) { hide(); return; }
+    popup.innerHTML = matches.map((p, i) => `
+      <div class="mention-option${i === selectedIdx ? " selected" : ""}" data-idx="${i}">
+        <span class="mo-id" style="color:${p.accent}">@${p.id}</span>
+        <span class="mo-role">${p.role}</span>
+      </div>`).join("");
+    popup.hidden = false;
+  }
+  function hide() {
+    popup.hidden = true;
+    matches = [];
+    tokenStart = tokenEnd = -1;
+  }
+  // Synthetic @team entry — broadcasts to everyone. Sits at the top of the
+  // list so a bare `@` lands on it.
+  const TEAM_OPTION = { id: "team", name: "team", role: "broadcast all", accent: "#ffffff" };
+
+  function refresh() {
+    const tok = findActiveToken();
+    if (!tok) { hide(); return; }
+    tokenStart = tok.start;
+    tokenEnd = tok.end;
+    const candidates = [TEAM_OPTION, ...ROSTER];
+    matches = candidates.filter((p) =>
+      p.id.startsWith(tok.partial) || p.name.toLowerCase().startsWith(tok.partial)
+    );
+    selectedIdx = 0;
+    render();
+  }
+  function move(delta) {
+    if (matches.length === 0) return;
+    selectedIdx = (selectedIdx + delta + matches.length) % matches.length;
+    render();
+  }
+  function accept(idx) {
+    const p = matches[idx];
+    if (!p) return;
+    const v = ta.value;
+    const before = v.slice(0, tokenStart);
+    const after  = v.slice(tokenEnd);
+    const insert = "@" + p.id + " ";
+    ta.value = before + insert + after;
+    const newCaret = before.length + insert.length;
+    ta.setSelectionRange(newCaret, newCaret);
+    hide();
+    if (ta._refreshMirror) ta._refreshMirror();
+    autoGrow(ta);
+    // fire input so listeners (draft persist) see the change
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  ta.addEventListener("input", refresh);
+  ta.addEventListener("click", refresh);
+  ta.addEventListener("keyup", (e) => {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") refresh();
+  });
+  ta.addEventListener("keydown", (e) => {
+    if (popup.hidden) return;
+    // Each branch claims the key fully — stopImmediatePropagation prevents
+    // the sibling enter-to-submit handler from also firing after we hide().
+    if (e.key === "ArrowDown")     { e.preventDefault(); e.stopImmediatePropagation(); move(1); }
+    else if (e.key === "ArrowUp")  { e.preventDefault(); e.stopImmediatePropagation(); move(-1); }
+    else if (e.key === "Tab")      { e.preventDefault(); e.stopImmediatePropagation(); accept(selectedIdx); }
+    else if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation(); accept(selectedIdx); }
+    else if (e.key === "Escape")   { e.preventDefault(); e.stopImmediatePropagation(); hide(); }
+  });
+  popup.addEventListener("mousedown", (e) => {
+    // mousedown not click — clicking the popup blurs the textarea, so we run
+    // before blur cancels things, then preventDefault to keep focus
+    const opt = e.target.closest(".mention-option");
+    if (!opt) return;
+    e.preventDefault();
+    accept(parseInt(opt.dataset.idx, 10));
+  });
+  ta.addEventListener("blur", () => setTimeout(hide, 150));
+}
+
+// Hydrate draft inputs on load + persist as the user types. The broadcast
+// input is a singleton (one DOM node), so we restore once. The dialog input
+// is reused across pokemon, so its key is whichever dialog is open at the
+// moment the user types — openDialog() handles restore for that side.
+{
+  const bInp    = document.getElementById("broadcast-input");
+  const bMirror = document.getElementById("broadcast-mirror");
+  const bPopup  = document.getElementById("broadcast-popup");
+  bInp.value = getDraft(DRAFT_BROADCAST);
+  bInp.addEventListener("input", () => setDraft(DRAFT_BROADCAST, bInp.value));
+  bInp.addEventListener("input", () => autoGrow(bInp));
+  bindMentionMirror(bInp, bMirror);
+  bindAutocomplete(bInp, bPopup);
+  bindEnterToSubmit(bInp, bPopup);
+  autoGrow(bInp);
+
+  const dInp    = document.getElementById("dialog-input");
+  const dMirror = document.getElementById("dialog-mirror");
+  const dPopup  = document.getElementById("dialog-popup");
+  dInp.addEventListener("input", () => {
+    if (activeDialog) setDraft(activeDialog.id, dInp.value);
+  });
+  dInp.addEventListener("input", () => autoGrow(dInp));
+  bindMentionMirror(dInp, dMirror);
+  bindAutocomplete(dInp, dPopup);
+  bindEnterToSubmit(dInp, dPopup);
+  autoGrow(dInp);
+}
 
 // Click a name OR a (more) pill in chat → open that pokemon's dialog
 log.addEventListener("click", (ev) => {
@@ -1388,6 +1859,9 @@ async function sendBroadcast(e) {
   if (!t) return;
   appendLog("Justin", t, "#fff");
   inp.value = "";
+  if (inp._refreshMirror) inp._refreshMirror();
+  autoGrow(inp);
+  clearDraft(DRAFT_BROADCAST);
   inp.disabled = true;
 
   const sessions = {};
@@ -1407,11 +1881,15 @@ async function sendBroadcast(e) {
 
     await readSSE(res.body, (event, data) => {
       if (event === "thinking") {
-        showBubble(data.pokemon, "…");
+        // setThinkingBubble adds the .thinking class so the bubble pulses.
+        // showBubble strips that class, which is why the animation never played.
+        setThinkingBubble(data.pokemon);
+        showWorking(data.pokemon);
       } else if (event === "pass") {
         // Refresh from real unread state so we don't wipe a bubble that was already there.
         if (data.sessionId) setSession(data.pokemon, data.sessionId);
         refreshBubble(data.pokemon);
+        hideWorking(data.pokemon);
       } else if (event === "response") {
         if (data.sessionId) setSession(data.pokemon, data.sessionId);
         // Mirror the broadcast into this pokemon's transcript so opening their dialog shows the thread.
@@ -1427,6 +1905,7 @@ async function sendBroadcast(e) {
         } else {
           surfaceUpdate(data.pokemon, data.summary, data.body);
         }
+        hideWorking(data.pokemon);
       }
     });
   } catch (err) {
@@ -1434,6 +1913,7 @@ async function sendBroadcast(e) {
   } finally {
     inp.disabled = false;
     inp.focus();
+    clearWorking();   // any chips left over (network error, etc.)
   }
 }
 function escapeHtml(s) {
